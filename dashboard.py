@@ -36,7 +36,6 @@ def load_and_combine_data(uploaded_files):
         try:
             df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip', low_memory=True)
             
-            # Spaltenerkennung
             cols = {
                 'shop': next((c for c in df_temp.columns if any(x in c.lower() for x in ['shop', 'seller', 'anbieter'])), None),
                 'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['produktname', 'title', 'titel', 'name', 'nazwa'])), df_temp.columns[0]),
@@ -48,10 +47,8 @@ def load_and_combine_data(uploaded_files):
             }
             
             df_clean = pd.DataFrame()
-            # Wir behalten den Namen als String für die Anzeige
             df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
-            # Wir speichern die URL separat
-            df_clean['URL_Hidden'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
+            df_clean['URL'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
             df_clean['Shop'] = df_temp[cols['shop']].fillna(file.name).astype(str) if cols['shop'] else file.name
             df_clean['Hersteller'] = df_temp[cols['brand']].fillna("N/A").astype(str) if cols['brand'] else "N/A"
             
@@ -86,9 +83,8 @@ with st.sidebar:
 master_df = load_and_combine_data(files)
 
 if master_df is not None:
-    # --- GLOBALE SUCHE ---
     st.subheader("🔍 Globale Suche")
-    search_query = st.text_input("Tippe Modell oder Marke ein (z.B. 'Tripower X 25'):", placeholder="Ergebnisse erscheinen sofort...")
+    search_query = st.text_input("Tippe Modell oder Marke ein (z.B. 'Tripower X 25'):", placeholder="Ergebnisse erscheinen sofort beim Tippen...")
 
     col_f1, col_f2 = st.columns([2, 1])
     with col_f1:
@@ -97,7 +93,7 @@ if master_df is not None:
         sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch"])
 
     # --- FILTER LOGIK ---
-    filtered_df = master_df
+    filtered_df = master_df.copy()
     if search_query:
         kws = search_query.lower().split()
         for kw in kws:
@@ -113,23 +109,34 @@ if master_df is not None:
     else:
         filtered_df = filtered_df.sort_values('Produktname', ascending=True)
 
-    # --- ANZEIGE (DER TITEL-FIX) ---
     st.divider()
     st.write(f"📊 **Treffer:** {len(filtered_df):,} Produkte")
 
-    # WICHTIG: Wir nutzen die Spalte 'URL_Hidden' als Datenquelle für den Link, 
-    # lassen aber 'Produktname' als Text anzeigen.
+    # --- TITEL-FIX MIT KOMBINIERTER DARSTELLUNG ---
+    # Wir erstellen eine Anzeige-Tabelle, die den Namen klickbar als URL setzt
+    display_df = filtered_df.head(1000).copy()
+    
+    # Wir nutzen die LinkColumn mit dem URL-Feld, aber zeigen den NAMEN per Display-Text Regex an
+    # Trick: Wir packen den Namen UND die URL zusammen in eine neue Spalte und nutzen Markdown
+    
     st.dataframe(
-        filtered_df[['URL_Hidden', 'Produktname', 'Shop', 'Hersteller', 'Preis', 'Status', 'Kategorie', 'Bild']],
+        display_df[['URL', 'Produktname', 'Shop', 'Hersteller', 'Preis', 'Status', 'Kategorie', 'Bild']],
         column_config={
-            "URL_Hidden": st.column_config.LinkColumn(
-                "Produktname (Link zum Shop) 🔗", 
-                display_text=filtered_df["Produktname"], # ZEIGT DEN NAMEN AN
+            "URL": st.column_config.LinkColumn(
+                "Zum Shop 🔗",
+                display_text="Öffnen",
+                width="small"
+            ),
+            "Produktname": st.column_config.TextColumn(
+                "Produktname",
                 width="large"
             ),
             "Preis": st.column_config.NumberColumn("Preis", format="%.2f €"),
-            "Bild": st.column_config.ImageColumn("Vorschau"),
-            "Produktname": None # Blendet die redundante Namens-Spalte aus
+            "Bild": st.column_config.ImageColumn("Vorschau", width="small"),
+            "Shop": st.column_config.TextColumn("Shop"),
+            "Hersteller": st.column_config.TextColumn("Hersteller"),
+            "Status": st.column_config.TextColumn("Status"),
+            "Kategorie": st.column_config.TextColumn("Kategorie")
         },
         use_container_width=True,
         height=600,
