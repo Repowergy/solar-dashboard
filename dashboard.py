@@ -18,7 +18,7 @@ def clean_price(price_val):
 
 def detect_type(text):
     text = str(text).lower()
-    if any(x in text for x in ['inverter', 'wechselrichter', 'falownik', 'onduleur']): return '🔌 Inverter'
+    if any(x in text for x in ['inverter', 'wechselrichter', 'falownik']): return '🔌 Inverter'
     if any(x in text for x in ['panel', 'module', 'modul', 'pv', 'shingled']): return '☀️ Modul'
     if any(x in text for x in ['battery', 'batterie', 'speicher', 'akku', 'storage']): return '🔋 Speicher'
     if any(x in text for x in ['cable', 'kabel', 'leitung', 'wire']): return '🔗 Kabel'
@@ -35,7 +35,6 @@ with st.sidebar:
         type=['csv'], 
         accept_multiple_files=True
     )
-    st.divider()
     if uploaded_files:
         st.success(f"{len(uploaded_files)} Dateien aktiv")
 
@@ -45,18 +44,17 @@ if uploaded_files:
     
     for file in uploaded_files:
         try:
-            # CSV flexibel einlesen
+            # Schnelles Einlesen für große Dateien
             df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip')
             
-            # Automatische Spaltenerkennung (Sucht nach Schlüsselwörtern in jeder Sprache)
+            # Spaltenerkennung
             cols = {
-                'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['title', 'titel', 'name', 'nazwa', 'produk', 'label'])), df_temp.columns[0]),
-                'price': next((c for c in df_temp.columns if any(x in c.lower() for x in ['price', 'preis', 'cena', 'prix', 'prezzo'])), None),
-                'ean': next((c for c in df_temp.columns if any(x in c.lower() for x in ['ean', 'gtin', 'art-nr', 'article', 'sku'])), None),
+                'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['title', 'titel', 'name', 'nazwa', 'produk'])), df_temp.columns[0]),
+                'price': next((c for c in df_temp.columns if any(x in c.lower() for x in ['price', 'preis', 'cena', 'prix'])), None),
+                'ean': next((c for c in df_temp.columns if any(x in c.lower() for x in ['ean', 'gtin', 'art-nr', 'sku'])), None),
                 'brand': next((c for c in df_temp.columns if any(x in c.lower() for x in ['brand', 'hersteller', 'manufacturer', 'marka'])), None)
             }
             
-            # Normalisierung der Daten
             df_clean = pd.DataFrame({
                 'Produktname': df_temp[cols['title']],
                 'EAN/SKU': df_temp[cols['ean']] if cols['ean'] else 'N/A',
@@ -72,84 +70,55 @@ if uploaded_files:
     if all_data:
         master_df = pd.concat(all_data, ignore_index=True)
         
-        # --- GLOBALE FILTER SEKTION ---
+        # --- GLOBALE FILTER ---
         st.subheader("🔍 Globale Suche & Filter")
-        
-        # Obere Filter-Leiste
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
-            search_query = st.text_input("Suche nach Produktname oder Modell:", placeholder="z.B. Deye, Jinko, 10kW...")
+            search_query = st.text_input("Suche nach Produktname oder Modell:")
         with c2:
             ean_query = st.text_input("Suche nach EAN / Artikelnummer:")
         with c3:
             sort_order = st.selectbox("Sortierung", ["Preis: Günstigster zuerst", "Preis: Teuerster zuerst", "Name A-Z"])
 
-        # Erweiterte Filter (Expander)
-        with st.expander("➕ Erweiterte Filter (Kategorie, Hersteller, Anbieter)"):
+        with st.expander("➕ Erweiterte Filter"):
             f1, f2, f3 = st.columns(3)
             with f1:
-                selected_cats = st.multiselect("Kategorien wählen:", options=list(master_df['Kategorie'].unique()), default=list(master_df['Kategorie'].unique()))
+                selected_cats = st.multiselect("Kategorien:", options=list(master_df['Kategorie'].unique()), default=list(master_df['Kategorie'].unique()))
             with f2:
-                selected_brands = st.multiselect("Hersteller wählen:", options=list(master_df['Hersteller'].unique()))
+                selected_brands = st.multiselect("Hersteller:", options=list(master_df['Hersteller'].unique()))
             with f3:
-                selected_sources = st.multiselect("Anbieter wählen:", options=list(master_df['Anbieter'].unique()))
+                selected_sources = st.multiselect("Anbieter:", options=list(master_df['Anbieter'].unique()))
 
-        # --- FILTER LOGIK ANWENDEN ---
+        # Filter anwenden
         filtered_df = master_df.copy()
+        if search_query: filtered_df = filtered_df[filtered_df['Produktname'].str.contains(search_query, case=False, na=False)]
+        if ean_query: filtered_df = filtered_df[filtered_df['EAN/SKU'].astype(str).str.contains(ean_query, case=False, na=False)]
+        if selected_cats: filtered_df = filtered_df[filtered_df['Kategorie'].isin(selected_cats)]
+        if selected_brands: filtered_df = filtered_df[filtered_df['Hersteller'].isin(selected_brands)]
+        if selected_sources: filtered_df = filtered_df[filtered_df['Anbieter'].isin(selected_sources)]
 
-        if search_query:
-            filtered_df = filtered_df[filtered_df['Produktname'].str.contains(search_query, case=False, na=False)]
-        
-        if ean_query:
-            filtered_df = filtered_df[filtered_df['EAN/SKU'].astype(str).str.contains(ean_query, case=False, na=False)]
+        # Sortierung
+        if sort_order == "Preis: Günstigster zuerst": filtered_df = filtered_df.sort_values('Preis', ascending=True)
+        elif sort_order == "Preis: Teuerster zuerst": filtered_df = filtered_df.sort_values('Preis', ascending=False)
+        else: filtered_df = filtered_df.sort_values('Produktname', ascending=True)
 
-        if selected_cats:
-            filtered_df = filtered_df[filtered_df['Kategorie'].isin(selected_cats)]
-
-        if selected_brands:
-            filtered_df = filtered_df[filtered_df['Hersteller'].isin(selected_brands)]
-
-        if selected_sources:
-            filtered_df = filtered_df[filtered_df['Anbieter'].isin(selected_sources)]
-
-        # Sortierung anwenden
-        if sort_order == "Preis: Günstigster zuerst":
-            filtered_df = filtered_df.sort_values('Preis', ascending=True)
-        elif sort_order == "Preis: Teuerster zuerst":
-            filtered_df = filtered_df.sort_values('Preis', ascending=False)
-        else:
-            filtered_df = filtered_df.sort_values('Produktname', ascending=True)
-
-        # --- ANZEIGE ---
         st.divider()
         st.write(f"**Ergebnis:** {len(filtered_df)} Treffer gefunden.")
 
+        # --- FIX: STABILE ANZEIGE FÜR GROSSE DATENMENGEN ---
         if not filtered_df.empty:
-            # Hervorhebung des günstigsten Preises
-            if sort_order == "Preis: Günstigster zuerst" and not search_query == "":
-                best_deal = filtered_df.iloc[0]
-                st.success(f"💡 **Top Deal:** {best_deal['Preis']:.2f} € bei **{best_deal['Anbieter']}** ({best_deal['Produktname']})")
+            # Top-Deal Anzeige nur bei Suche
+            if (search_query or ean_query) and sort_order == "Preis: Günstigster zuerst":
+                best = filtered_df.iloc[0]
+                st.success(f"🔥 **Bester Preis:** {best['Preis']:.2f} € bei **{best['Anbieter']}**")
 
-            # Tabelle mit Formatierung
-            st.dataframe(
-                filtered_df.style.format({
-                    "Preis": "{:.2f} €"
-                }), 
-                use_container_width=True,
-                height=600
-            )
+            # Wir zeigen die Daten ohne .style (vermeidet Absturz) in einem performanten Dataframe
+            st.dataframe(filtered_df, use_container_width=True, height=500)
+            
+            # Export
+            csv = filtered_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📊 Auswahl als CSV exportieren", csv, "solar_export.csv", "text/csv")
         else:
-            st.warning("Keine Produkte mit diesen Filtereinstellungen gefunden.")
-
-        # Export Funktion
-        csv = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📊 Diese Auswahl als CSV exportieren",
-            data=csv,
-            file_name="solar_preisvergleich_export.csv",
-            mime="text/csv",
-        )
+            st.warning("Keine Treffer.")
 else:
-    # Begrüßung wenn keine Daten da sind
-    st.info("👋 Willkommen! Bitte lade deine Lieferanten-CSV-Dateien in der Sidebar hoch.")
-    st.image("https://img.icons8.com/clouds/200/solar-panel.png")
+    st.info("👋 Bitte lade deine CSV-Dateien in der Sidebar hoch.")
