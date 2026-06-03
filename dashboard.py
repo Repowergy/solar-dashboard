@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
+import io
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title='Solar Mega-Engine AI', page_icon='⚡', layout='wide')
@@ -26,77 +27,85 @@ def safe_detect_type(name):
     return '📦 Sonstiges'
 
 def find_column(df_columns, keywords):
-    """Findet die passende Spalte robust auch bei Großschreibung etc."""
     for col in df_columns:
         col_low = str(col).lower().strip()
         for kw in keywords:
-            if kw in col_low:
+            if kw == col_low:  # EXAKTER Match zuerst
+                return col
+    for col in df_columns:
+        col_low = str(col).lower().strip()
+        for kw in keywords:
+            if kw in col_low:  # Dann Teil-Match
                 return col
     return None
 
-# --- CACHING DER DATEN ---
-@st.cache_data(show_spinner="Analysiere Massendaten...")
-def load_and_combine_data(uploaded_files):
-    if not uploaded_files:
+# --- DATEN-VERARBEITUNG OHNE CACHE-PROBLEM ---
+def process_single_file(file_bytes, file_name):
+    """Verarbeitet eine einzelne Datei aus Bytes."""
+    try:
+        # Aus Bytes lesen
+        df_temp = pd.read_csv(io.BytesIO(file_bytes), sep=',', on_bad_lines='skip', low_memory=False)
+        
+        # Fallback auf Semikolon falls nur 1 Spalte
+        if len(df_temp.columns) < 3:
+            df_temp = pd.read_csv(io.BytesIO(file_bytes), sep=';', on_bad_lines='skip', low_memory=False)
+        
+        # Debug-Ausgabe
+        st.sidebar.success(f"✅ {file_name}: {len(df_temp)} Zeilen")
+        st.sidebar.caption(f"Erkannte Spalten: {list(df_temp.columns)}")
+        
+        # PRÄZISE Spaltenerkennung
+        cols = {
+            'shop': find_column(df_temp.columns, ['shop', 'seller', 'anbieter']),
+            'title': find_column(df_temp.columns, ['produktname', 'product_title', 'title', 'titel', 'name']),
+            'price': find_column(df_temp.columns, ['preis', 'price', 'cena']),
+            'stock': find_column(df_temp.columns, ['verfügbarkeit', 'verfugbarkeit', 'stock', 'availability']),
+            'url': find_column(df_temp.columns, ['shop_url', 'product_url', 'url', 'link']),
+            'image': find_column(df_temp.columns, ['image_urls', 'image', 'bild']),
+            'brand': find_column(df_temp.columns, ['hersteller', 'brand', 'manufacturer'])
+        }
+        
+        st.sidebar.caption(f"Mapping: {cols}")
+        
+        if cols['title'] is None:
+            cols['title'] = df_temp.columns[0]
+
+        df_clean = pd.DataFrame()
+        df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
+        df_clean['URL'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
+        df_clean['Shop'] = df_temp[cols['shop']].fillna(file_name).astype(str) if cols['shop'] else file_name
+        df_clean['Hersteller'] = df_temp[cols['brand']].fillna("N/A").astype(str) if cols['brand'] else "N/A"
+        
+        if cols['price']:
+            df_clean['Preis'] = df_temp[cols['price']].apply(clean_price)
+        else:
+            df_clean['Preis'] = 0.0
+
+        df_clean['Status'] = df_temp[cols['stock']].fillna("Unbekannt").astype(str) if cols['stock'] else "Unbekannt"
+        df_clean['Kategorie'] = df_clean['Produktname'].apply(safe_detect_type)
+        df_clean['Bild'] = df_temp[cols['image']].fillna("").astype(str) if cols['image'] else None
+        
+        return df_clean
+    except Exception as e:
+        st.error(f"Fehler in {file_name}: {e}")
         return None
-    
+
+@st.cache_data(show_spinner="Analysiere Massendaten...")
+def load_data(file_data_list):
+    """Cached die VERARBEITETEN Daten, nicht die Datei-Objekte."""
     all_data = []
-    for file in uploaded_files:
-        try:
-            # ROBUSTES LADEN: Erst Komma versuchen, dann Semikolon als Fallback
-            try:
-                df_temp = pd.read_csv(file, sep=',', on_bad_lines='skip', low_memory=False)
-                if len(df_temp.columns) < 3: # Falls Komma nicht funktioniert hat
-                    file.seek(0)
-                    df_temp = pd.read_csv(file, sep=';', on_bad_lines='skip', low_memory=False)
-            except:
-                file.seek(0)
-                df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip')
-            
-            # Debugging Info
-            st.sidebar.write(f"📂 {file.name}: {len(df_temp)} Zeilen, Spalten: {list(df_temp.columns)[:5]}...")
-            
-            # Spaltenerkennung MIT robuster Logik
-            cols = {
-                'shop': find_column(df_temp.columns, ['shop', 'seller', 'anbieter']),
-                'title': find_column(df_temp.columns, ['produktname', 'title', 'titel', 'name', 'nazwa', 'product_title']),
-                'price': find_column(df_temp.columns, ['preis', 'price', 'cena']),
-                'stock': find_column(df_temp.columns, ['verfügbarkeit', 'stock', 'availability']),
-                'url': find_column(df_temp.columns, ['shop_url', 'url', 'link', 'product_url']),
-                'image': find_column(df_temp.columns, ['image_urls', 'image', 'bild', 'zdjecie']),
-                'brand': find_column(df_temp.columns, ['hersteller', 'brand', 'manufacturer'])
-            }
-            
-            # Sicherheits-Fallback: Falls Titel nicht gefunden -> erste Spalte
-            if cols['title'] is None:
-                cols['title'] = df_temp.columns[0]
-
-            df_clean = pd.DataFrame()
-            df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
-            df_clean['URL'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
-            df_clean['Shop'] = df_temp[cols['shop']].fillna(file.name).astype(str) if cols['shop'] else file.name
-            df_clean['Hersteller'] = df_temp[cols['brand']].fillna("N/A").astype(str) if cols['brand'] else "N/A"
-            
-            if cols['price']:
-                df_clean['Preis'] = df_temp[cols['price']].apply(clean_price)
-            else:
-                df_clean['Preis'] = 0.0
-
-            df_clean['Status'] = df_temp[cols['stock']].fillna("Unbekannt").astype(str) if cols['stock'] else "Unbekannt"
-            df_clean['Kategorie'] = df_clean['Produktname'].apply(safe_detect_type)
-            df_clean['Bild'] = df_temp[cols['image']].fillna("").astype(str) if cols['image'] else None
-            
-            all_data.append(df_clean)
-        except Exception as e:
-            st.error(f"Fehler in {file.name}: {e}")
-            
+    for file_bytes, file_name in file_data_list:
+        df = process_single_file(file_bytes, file_name)
+        if df is not None:
+            all_data.append(df)
+    
     if all_data:
         return pd.concat(all_data, ignore_index=True)
     return None
 
 # --- UI START ---
 st.title('⚡ Solar Price Engine (Mega-Engine)')
-st.markdown("Suche über alle Dateien hinweg. **Klicke auf den Produktnamen**, um zum Shop zu gelangen.")
+st.markdown("Suche über alle Dateien hinweg. **Klicke auf 'Öffnen'**, um zum Shop zu gelangen.")
 
 with st.sidebar:
     st.header("📥 Massen-Import")
@@ -105,9 +114,13 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-master_df = load_and_combine_data(files)
+# Dateien in Bytes umwandeln BEVOR sie an den Cache gehen
+master_df = None
+if files:
+    file_data = [(f.getvalue(), f.name) for f in files]
+    master_df = load_data(tuple([(bytes(b), n) for b, n in file_data]))
 
-if master_df is not None:
+if master_df is not None and len(master_df) > 0:
     st.subheader("🔍 Globale Suche")
     search_query = st.text_input("Tippe Modell oder Marke ein (z.B. 'Tripower X 25'):", placeholder="Ergebnisse erscheinen sofort beim Tippen...")
 
@@ -117,7 +130,6 @@ if master_df is not None:
     with col_f2:
         sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch"])
 
-    # Filter
     filtered_df = master_df.copy()
     if search_query:
         kws = search_query.lower().split()
