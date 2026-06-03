@@ -8,7 +8,9 @@ st.set_page_config(page_title='Solar Price Intelligence', page_icon='💰', layo
 # --- FUNKTIONEN ---
 def clean_price(price_val):
     if pd.isna(price_val): return 0.0
-    res = re.sub(r'[^\d,.]', '', str(price_val)).replace(',', '.')
+    # Entfernt Währungen wie 'EUR' und Sonderzeichen
+    res = str(price_val).replace('EUR', '').replace('€', '').strip()
+    res = re.sub(r'[^\d,.]', '', res).replace(',', '.')
     try:
         if res.count('.') > 1:
             parts = res.split('.')
@@ -26,17 +28,15 @@ def detect_type(text):
 
 # --- UI START ---
 st.title('💰 Solar Price Comparison & Filter Engine')
-st.markdown("Analysiere und filtere über 150+ Lieferantenlisten gleichzeitig.")
+st.markdown("Analysiere Preise, Bestände und Shops über alle Listen hinweg.")
 
 with st.sidebar:
     st.header("📥 Daten-Zentrale")
     uploaded_files = st.file_uploader(
-        "Alle CSV-Dateien hier hochladen", 
+        "CSV-Dateien hier hochladen", 
         type=['csv'], 
         accept_multiple_files=True
     )
-    if uploaded_files:
-        st.success(f"{len(uploaded_files)} Dateien aktiv")
 
 # --- DATEN-VERARBEITUNG ---
 if uploaded_files:
@@ -44,23 +44,25 @@ if uploaded_files:
     
     for file in uploaded_files:
         try:
-            # Schnelles Einlesen für große Dateien
             df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip')
             
-            # Spaltenerkennung
+            # Spaltenerkennung (Shop, Titel, Preis, EAN, Verfügbarkeit)
             cols = {
-                'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['title', 'titel', 'name', 'nazwa', 'produk'])), df_temp.columns[0]),
-                'price': next((c for c in df_temp.columns if any(x in c.lower() for x in ['price', 'preis', 'cena', 'prix'])), None),
-                'ean': next((c for c in df_temp.columns if any(x in c.lower() for x in ['ean', 'gtin', 'art-nr', 'sku'])), None),
-                'brand': next((c for c in df_temp.columns if any(x in c.lower() for x in ['brand', 'hersteller', 'manufacturer', 'marka'])), None)
+                'shop': next((c for c in df_temp.columns if any(x in c.lower() for x in ['shop', 'verkäufer', 'seller', 'anbieter'])), None),
+                'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['produktname', 'title', 'titel', 'name', 'nazwa'])), df_temp.columns[0]),
+                'price': next((c for c in df_temp.columns if any(x in c.lower() for x in ['preis', 'price', 'cena'])), None),
+                'ean': next((c for c in df_temp.columns if any(x in c.lower() for x in ['artikelnummer', 'ean', 'sku', 'art-nr'])), None),
+                'brand': next((c for c in df_temp.columns if any(x in c.lower() for x in ['hersteller', 'brand', 'manufacturer'])), None),
+                'stock': next((c for c in df_temp.columns if any(x in c.lower() for x in ['verfügbarkeit', 'stock', 'availability'])), None)
             }
             
             df_clean = pd.DataFrame({
+                'Shop/Quelle': df_temp[cols['shop']] if cols['shop'] else file.name,
                 'Produktname': df_temp[cols['title']],
-                'EAN/SKU': df_temp[cols['ean']] if cols['ean'] else 'N/A',
+                'EAN/ArtNr': df_temp[cols['ean']] if cols['ean'] else 'N/A',
                 'Hersteller': df_temp[cols['brand']] if cols['brand'] else 'N/A',
                 'Preis': df_temp[cols['price']].apply(clean_price) if cols['price'] else 0.0,
-                'Anbieter': file.name,
+                'Status': df_temp[cols['stock']] if cols['stock'] else 'Unbekannt',
                 'Kategorie': df_temp[cols['title']].apply(detect_type)
             })
             all_data.append(df_clean)
@@ -70,55 +72,33 @@ if uploaded_files:
     if all_data:
         master_df = pd.concat(all_data, ignore_index=True)
         
-        # --- GLOBALE FILTER ---
-        st.subheader("🔍 Globale Suche & Filter")
+        # --- FILTER ---
+        st.subheader("🔍 Produktsuche")
         c1, c2, c3 = st.columns([2, 1, 1])
         with c1:
-            search_query = st.text_input("Suche nach Produktname oder Modell:")
+            search_query = st.text_input("Nach Modell suchen:")
         with c2:
-            ean_query = st.text_input("Suche nach EAN / Artikelnummer:")
+            shop_filter = st.multiselect("Shop auswählen:", options=list(master_df['Shop/Quelle'].unique()))
         with c3:
-            sort_order = st.selectbox("Sortierung", ["Preis: Günstigster zuerst", "Preis: Teuerster zuerst", "Name A-Z"])
-
-        with st.expander("➕ Erweiterte Filter"):
-            f1, f2, f3 = st.columns(3)
-            with f1:
-                selected_cats = st.multiselect("Kategorien:", options=list(master_df['Kategorie'].unique()), default=list(master_df['Kategorie'].unique()))
-            with f2:
-                selected_brands = st.multiselect("Hersteller:", options=list(master_df['Hersteller'].unique()))
-            with f3:
-                selected_sources = st.multiselect("Anbieter:", options=list(master_df['Anbieter'].unique()))
+            sort_order = st.selectbox("Sortierung", ["Preis: Günstigster zuerst", "Preis: Teuerster zuerst"])
 
         # Filter anwenden
         filtered_df = master_df.copy()
         if search_query: filtered_df = filtered_df[filtered_df['Produktname'].str.contains(search_query, case=False, na=False)]
-        if ean_query: filtered_df = filtered_df[filtered_df['EAN/SKU'].astype(str).str.contains(ean_query, case=False, na=False)]
-        if selected_cats: filtered_df = filtered_df[filtered_df['Kategorie'].isin(selected_cats)]
-        if selected_brands: filtered_df = filtered_df[filtered_df['Hersteller'].isin(selected_brands)]
-        if selected_sources: filtered_df = filtered_df[filtered_df['Anbieter'].isin(selected_sources)]
+        if shop_filter: filtered_df = filtered_df[filtered_df['Shop/Quelle'].isin(shop_filter)]
 
-        # Sortierung
         if sort_order == "Preis: Günstigster zuerst": filtered_df = filtered_df.sort_values('Preis', ascending=True)
-        elif sort_order == "Preis: Teuerster zuerst": filtered_df = filtered_df.sort_values('Preis', ascending=False)
-        else: filtered_df = filtered_df.sort_values('Produktname', ascending=True)
+        else: filtered_df = filtered_df.sort_values('Preis', ascending=False)
 
         st.divider()
-        st.write(f"**Ergebnis:** {len(filtered_df)} Treffer gefunden.")
+        st.write(f"**Treffer:** {len(filtered_df)}")
 
-        # --- FIX: STABILE ANZEIGE FÜR GROSSE DATENMENGEN ---
         if not filtered_df.empty:
-            # Top-Deal Anzeige nur bei Suche
-            if (search_query or ean_query) and sort_order == "Preis: Günstigster zuerst":
-                best = filtered_df.iloc[0]
-                st.success(f"🔥 **Bester Preis:** {best['Preis']:.2f} € bei **{best['Anbieter']}**")
-
-            # Wir zeigen die Daten ohne .style (vermeidet Absturz) in einem performanten Dataframe
-            st.dataframe(filtered_df, use_container_width=True, height=500)
+            # Tabelle anzeigen (Shop/Quelle steht jetzt ganz links!)
+            st.dataframe(filtered_df, use_container_width=True, height=600)
             
             # Export
             csv = filtered_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📊 Auswahl als CSV exportieren", csv, "solar_export.csv", "text/csv")
-        else:
-            st.warning("Keine Treffer.")
+            st.download_button("📊 Auswahl exportieren", csv, "solar_preisvergleich.csv", "text/csv")
 else:
-    st.info("👋 Bitte lade deine CSV-Dateien in der Sidebar hoch.")
+    st.info("👋 Bitte lade die CSV-Dateien in der Sidebar hoch.")
