@@ -36,6 +36,7 @@ def load_and_combine_data(uploaded_files):
         try:
             df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip', low_memory=True)
             
+            # Spaltenerkennung
             cols = {
                 'shop': next((c for c in df_temp.columns if any(x in c.lower() for x in ['shop', 'seller', 'anbieter'])), None),
                 'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['produktname', 'title', 'titel', 'name', 'nazwa'])), df_temp.columns[0]),
@@ -47,8 +48,10 @@ def load_and_combine_data(uploaded_files):
             }
             
             df_clean = pd.DataFrame()
+            # Wir behalten den Namen als String für die Anzeige
             df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
-            df_clean['Link'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else df_clean['Produktname']
+            # Wir speichern die URL separat
+            df_clean['URL_Hidden'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
             df_clean['Shop'] = df_temp[cols['shop']].fillna(file.name).astype(str) if cols['shop'] else file.name
             df_clean['Hersteller'] = df_temp[cols['brand']].fillna("N/A").astype(str) if cols['brand'] else "N/A"
             
@@ -59,7 +62,7 @@ def load_and_combine_data(uploaded_files):
 
             df_clean['Status'] = df_temp[cols['stock']].fillna("Unbekannt").astype(str) if cols['stock'] else "Unbekannt"
             df_clean['Kategorie'] = df_clean['Produktname'].apply(safe_detect_type)
-            df_clean['Vorschau'] = df_temp[cols['image']].fillna("").astype(str) if cols['image'] else None
+            df_clean['Bild'] = df_temp[cols['image']].fillna("").astype(str) if cols['image'] else None
             
             all_data.append(df_clean)
         except Exception as e:
@@ -70,8 +73,8 @@ def load_and_combine_data(uploaded_files):
     return None
 
 # --- UI START ---
-st.title('⚡ Solar Price Intelligence (Mega-Engine)')
-st.markdown("Suche über alle Dateien hinweg. Ergebnisse werden **sofort** beim Tippen gefiltert.")
+st.title('⚡ Solar Price Engine (Mega-Engine)')
+st.markdown("Suche über alle Dateien hinweg. **Klicke auf den Produktnamen**, um zum Shop zu gelangen.")
 
 with st.sidebar:
     st.header("📥 Massen-Import")
@@ -80,15 +83,12 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# Daten laden
 master_df = load_and_combine_data(files)
 
 if master_df is not None:
-    # --- FLEXIBLE SUCHE ---
+    # --- GLOBALE SUCHE ---
     st.subheader("🔍 Globale Suche")
-    
-    # Text-Eingabe für flexible Suche (Tripower X etc.)
-    search_query = st.text_input("Tippe Modell, Marke oder EAN ein (z.B. 'Tripower X' oder 'Jinko 440'):", placeholder="Suche startet automatisch beim Tippen...")
+    search_query = st.text_input("Tippe Modell oder Marke ein (z.B. 'Tripower X 25'):", placeholder="Ergebnisse erscheinen sofort...")
 
     col_f1, col_f2 = st.columns([2, 1])
     with col_f1:
@@ -96,19 +96,16 @@ if master_df is not None:
     with col_f2:
         sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch"])
 
-    # --- FILTER LOGIK (Fuzzy & Flexibel) ---
+    # --- FILTER LOGIK ---
     filtered_df = master_df
-    
     if search_query:
-        # Splittet Suche in Begriffe auf (AND-Logik für höhere Präzision)
-        keywords = search_query.lower().split()
-        for kw in keywords:
+        kws = search_query.lower().split()
+        for kw in kws:
             filtered_df = filtered_df[filtered_df['Produktname'].str.lower().str.contains(kw, na=False)]
     
     if sel_shops:
         filtered_df = filtered_df[filtered_df['Shop'].isin(sel_shops)]
 
-    # Sortierung
     if sort_order == "Preis: Günstigste zuerst":
         filtered_df = filtered_df.sort_values('Preis', ascending=True)
     elif sort_order == "Preis: Teuerster zuerst":
@@ -116,22 +113,23 @@ if master_df is not None:
     else:
         filtered_df = filtered_df.sort_values('Produktname', ascending=True)
 
-    # --- ANZEIGE ---
+    # --- ANZEIGE (DER TITEL-FIX) ---
     st.divider()
-    st.write(f"📊 **Treffer:** {len(filtered_df):,} von {len(master_df):,} Produkten")
+    st.write(f"📊 **Treffer:** {len(filtered_df):,} Produkte")
 
-    # Wir nutzen eine performante Tabellenansicht
+    # WICHTIG: Wir nutzen die Spalte 'URL_Hidden' als Datenquelle für den Link, 
+    # lassen aber 'Produktname' als Text anzeigen.
     st.dataframe(
-        filtered_df.head(1000),
+        filtered_df[['URL_Hidden', 'Produktname', 'Shop', 'Hersteller', 'Preis', 'Status', 'Kategorie', 'Bild']],
         column_config={
-            "Link": st.column_config.LinkColumn(
+            "URL_Hidden": st.column_config.LinkColumn(
                 "Produktname (Link zum Shop) 🔗", 
-                display_text=r"(.+)",
+                display_text=filtered_df["Produktname"], # ZEIGT DEN NAMEN AN
                 width="large"
             ),
             "Preis": st.column_config.NumberColumn("Preis", format="%.2f €"),
-            "Vorschau": st.column_config.ImageColumn("Bild"),
-            "Produktname": None # Blende die Rohspalte aus, da der Link den Namen anzeigt
+            "Bild": st.column_config.ImageColumn("Vorschau"),
+            "Produktname": None # Blendet die redundante Namens-Spalte aus
         },
         use_container_width=True,
         height=600,
@@ -139,11 +137,11 @@ if master_df is not None:
     )
     
     if len(filtered_df) > 1000:
-        st.warning(f"⚠️ Zeige nur die ersten 1000 von {len(filtered_df):,} Treffern an. Bitte grenze die Suche weiter ein.")
+        st.warning(f"⚠️ Zeige die ersten 1000 von {len(filtered_df):,} Treffern an.")
 
     # Export
     csv_data = filtered_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📊 Gefilterte Liste als CSV exportieren", csv_data, "solar_preisvergleich_suche.csv", "text/csv")
+    st.download_button("📊 Liste als CSV exportieren", csv_data, "solar_export.csv", "text/csv")
 
 else:
-    st.info("👋 Bereit. Bitte lade deine CSV-Dateien in der Sidebar hoch.")
+    st.info("👋 Bereit. Bitte lade deine CSV-Dateien hoch.")
