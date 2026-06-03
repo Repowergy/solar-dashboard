@@ -25,6 +25,15 @@ def safe_detect_type(name):
     if any(x in n for x in ['cable', 'kabel', 'leitung', 'wire']): return '🔗 Kabel'
     return '📦 Sonstiges'
 
+def find_column(df_columns, keywords):
+    """Findet die passende Spalte robust auch bei Großschreibung etc."""
+    for col in df_columns:
+        col_low = str(col).lower().strip()
+        for kw in keywords:
+            if kw in col_low:
+                return col
+    return None
+
 # --- CACHING DER DATEN ---
 @st.cache_data(show_spinner="Analysiere Massendaten...")
 def load_and_combine_data(uploaded_files):
@@ -34,18 +43,34 @@ def load_and_combine_data(uploaded_files):
     all_data = []
     for file in uploaded_files:
         try:
-            df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip', low_memory=True)
+            # ROBUSTES LADEN: Erst Komma versuchen, dann Semikolon als Fallback
+            try:
+                df_temp = pd.read_csv(file, sep=',', on_bad_lines='skip', low_memory=False)
+                if len(df_temp.columns) < 3: # Falls Komma nicht funktioniert hat
+                    file.seek(0)
+                    df_temp = pd.read_csv(file, sep=';', on_bad_lines='skip', low_memory=False)
+            except:
+                file.seek(0)
+                df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip')
             
+            # Debugging Info
+            st.sidebar.write(f"📂 {file.name}: {len(df_temp)} Zeilen, Spalten: {list(df_temp.columns)[:5]}...")
+            
+            # Spaltenerkennung MIT robuster Logik
             cols = {
-                'shop': next((c for c in df_temp.columns if any(x in c.lower() for x in ['shop', 'seller', 'anbieter'])), None),
-                'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['produktname', 'title', 'titel', 'name', 'nazwa'])), df_temp.columns[0]),
-                'price': next((c for c in df_temp.columns if any(x in c.lower() for x in ['preis', 'price', 'cena'])), None),
-                'stock': next((c for c in df_temp.columns if any(x in c.lower() for x in ['verfügbarkeit', 'stock', 'availability'])), None),
-                'url': next((c for c in df_temp.columns if any(x in c.lower() for x in ['url', 'link', 'shop_url'])), None),
-                'image': next((c for c in df_temp.columns if any(x in c.lower() for x in ['image', 'bild', 'zdjecie'])), None),
-                'brand': next((c for c in df_temp.columns if any(x in c.lower() for x in ['hersteller', 'brand', 'manufacturer'])), None)
+                'shop': find_column(df_temp.columns, ['shop', 'seller', 'anbieter']),
+                'title': find_column(df_temp.columns, ['produktname', 'title', 'titel', 'name', 'nazwa', 'product_title']),
+                'price': find_column(df_temp.columns, ['preis', 'price', 'cena']),
+                'stock': find_column(df_temp.columns, ['verfügbarkeit', 'stock', 'availability']),
+                'url': find_column(df_temp.columns, ['shop_url', 'url', 'link', 'product_url']),
+                'image': find_column(df_temp.columns, ['image_urls', 'image', 'bild', 'zdjecie']),
+                'brand': find_column(df_temp.columns, ['hersteller', 'brand', 'manufacturer'])
             }
             
+            # Sicherheits-Fallback: Falls Titel nicht gefunden -> erste Spalte
+            if cols['title'] is None:
+                cols['title'] = df_temp.columns[0]
+
             df_clean = pd.DataFrame()
             df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
             df_clean['URL'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else ""
@@ -92,7 +117,7 @@ if master_df is not None:
     with col_f2:
         sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch"])
 
-    # --- FILTER LOGIK ---
+    # Filter
     filtered_df = master_df.copy()
     if search_query:
         kws = search_query.lower().split()
@@ -112,25 +137,13 @@ if master_df is not None:
     st.divider()
     st.write(f"📊 **Treffer:** {len(filtered_df):,} Produkte")
 
-    # --- TITEL-FIX MIT KOMBINIERTER DARSTELLUNG ---
-    # Wir erstellen eine Anzeige-Tabelle, die den Namen klickbar als URL setzt
     display_df = filtered_df.head(1000).copy()
-    
-    # Wir nutzen die LinkColumn mit dem URL-Feld, aber zeigen den NAMEN per Display-Text Regex an
-    # Trick: Wir packen den Namen UND die URL zusammen in eine neue Spalte und nutzen Markdown
     
     st.dataframe(
         display_df[['URL', 'Produktname', 'Shop', 'Hersteller', 'Preis', 'Status', 'Kategorie', 'Bild']],
         column_config={
-            "URL": st.column_config.LinkColumn(
-                "Zum Shop 🔗",
-                display_text="Öffnen",
-                width="small"
-            ),
-            "Produktname": st.column_config.TextColumn(
-                "Produktname",
-                width="large"
-            ),
+            "URL": st.column_config.LinkColumn("Zum Shop 🔗", display_text="Öffnen", width="small"),
+            "Produktname": st.column_config.TextColumn("Produktname", width="large"),
             "Preis": st.column_config.NumberColumn("Preis", format="%.2f €"),
             "Bild": st.column_config.ImageColumn("Vorschau", width="small"),
             "Shop": st.column_config.TextColumn("Shop"),
@@ -146,7 +159,6 @@ if master_df is not None:
     if len(filtered_df) > 1000:
         st.warning(f"⚠️ Zeige die ersten 1000 von {len(filtered_df):,} Treffern an.")
 
-    # Export
     csv_data = filtered_df.to_csv(index=False).encode('utf-8')
     st.download_button("📊 Liste als CSV exportieren", csv_data, "solar_export.csv", "text/csv")
 
