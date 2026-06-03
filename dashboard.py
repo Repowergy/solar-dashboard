@@ -26,12 +26,10 @@ def safe_detect_type(name):
 
 def find_column(df_columns, keywords):
     cols_list = [str(c).lower().strip() for c in df_columns]
-    # Exakter Match
     for kw in keywords:
         if kw in cols_list:
             idx = cols_list.index(kw)
             return df_columns[idx]
-    # Teil-Match
     for i, col_low in enumerate(cols_list):
         for kw in keywords:
             if kw in col_low:
@@ -39,13 +37,10 @@ def find_column(df_columns, keywords):
     return None
 
 def process_csv(uploaded_file):
-    """Verarbeitet eine CSV direkt ohne Cache-Probleme."""
     try:
-        # Datei einlesen
         content = uploaded_file.read()
         uploaded_file.seek(0)
         
-        # Erst mit Komma versuchen
         try:
             df = pd.read_csv(io.BytesIO(content), sep=',', on_bad_lines='skip', low_memory=False, encoding='utf-8')
         except:
@@ -57,7 +52,6 @@ def process_csv(uploaded_file):
         st.sidebar.success(f"✅ {uploaded_file.name}: {len(df):,} Zeilen geladen")
         st.sidebar.caption(f"Spalten: {list(df.columns)}")
         
-        # Spalten finden
         cols = {
             'shop': find_column(df.columns, ['shop', 'seller', 'anbieter']),
             'title': find_column(df.columns, ['produktname', 'product_title', 'title', 'titel', 'name']),
@@ -73,7 +67,6 @@ def process_csv(uploaded_file):
         if cols['title'] is None:
             cols['title'] = df.columns[0]
         
-        # DataFrame bauen - DIREKT aus df mit gefundenen Spaltennamen
         result = pd.DataFrame()
         result['Produktname'] = df[cols['title']].fillna("").astype(str).replace("", "Unbekannt")
         result['URL'] = df[cols['url']].fillna("").astype(str) if cols['url'] else ""
@@ -85,7 +78,7 @@ def process_csv(uploaded_file):
         else:
             result['Preis'] = 0.0
         
-        result['Status'] = df[cols['stock']].fillna("Unbekannt").astype(str) if cols['stock'] else "Unbekannt"
+        result['Status'] = df[cols['stock']].fillna("Auf Anfrage").astype(str) if cols['stock'] else "Auf Anfrage"
         result['Kategorie'] = result['Produktname'].apply(safe_detect_type)
         result['Bild'] = df[cols['image']].fillna("").astype(str) if cols['image'] else ""
         
@@ -103,7 +96,6 @@ with st.sidebar:
     st.header("📥 Massen-Import")
     files = st.file_uploader("Alle Lieferanten-Listen (CSV) hochladen", type=['csv'], accept_multiple_files=True)
 
-# Daten OHNE Cache verarbeiten - dafür mit Session State
 if files:
     if 'last_files' not in st.session_state or st.session_state.get('last_files') != [f.name for f in files]:
         with st.spinner("Verarbeite Dateien..."):
@@ -123,13 +115,16 @@ if master_df is not None and len(master_df) > 0:
     st.subheader("🔍 Globale Suche")
     search_query = st.text_input("Tippe Modell oder Marke ein (z.B. 'Tripower X 25'):", placeholder="Ergebnisse erscheinen sofort beim Tippen...")
 
-    col_f1, col_f2 = st.columns([2, 1])
+    col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
     with col_f1:
         sel_shops = st.multiselect("Anbieter filtern:", sorted(master_df['Shop'].unique().tolist()))
     with col_f2:
-        sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch"])
+        sort_order = st.selectbox("Sortierung:", ["Preis: Günstigste zuerst", "Preis: Teuerster zuerst", "Alphabetisch", "Mit Preis zuerst"])
+    with col_f3:
+        show_all = st.checkbox("Auch Produkte ohne Preis", value=True)
 
     filtered_df = master_df.copy()
+    
     if search_query:
         kws = search_query.lower().split()
         for kw in kws:
@@ -139,14 +134,26 @@ if master_df is not None and len(master_df) > 0:
         filtered_df = filtered_df[filtered_df['Shop'].isin(sel_shops)]
 
     if sort_order == "Preis: Günstigste zuerst":
-        filtered_df = filtered_df[filtered_df['Preis'] > 0].sort_values('Preis', ascending=True)
+        if show_all:
+            filtered_df = filtered_df.sort_values('Preis', ascending=True)
+        else:
+            filtered_df = filtered_df[filtered_df['Preis'] > 0].sort_values('Preis', ascending=True)
     elif sort_order == "Preis: Teuerster zuerst":
+        filtered_df = filtered_df.sort_values('Preis', ascending=False)
+    elif sort_order == "Mit Preis zuerst":
         filtered_df = filtered_df.sort_values('Preis', ascending=False)
     else:
         filtered_df = filtered_df.sort_values('Produktname', ascending=True)
 
     st.divider()
-    st.write(f"📊 **Treffer:** {len(filtered_df):,} Produkte")
+    
+    with_price = (filtered_df['Preis'] > 0).sum()
+    without_price = (filtered_df['Preis'] == 0).sum()
+    
+    col_s1, col_s2, col_s3 = st.columns(3)
+    col_s1.metric("📊 Gesamt-Treffer", f"{len(filtered_df):,}")
+    col_s2.metric("💰 Mit Preis", f"{with_price:,}")
+    col_s3.metric("📞 Auf Anfrage", f"{without_price:,}")
 
     display_df = filtered_df.head(1000).copy()
     
