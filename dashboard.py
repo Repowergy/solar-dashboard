@@ -3,10 +3,32 @@ import pandas as pd
 import re
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title='Solar Mega-Engine', page_icon='⚡', layout='wide')
+st.set_page_config(page_title='Solar Mega-Engine AI', page_icon='⚡', layout='wide')
+
+# --- HILFSFUNKTIONEN ---
+def clean_price(price_val):
+    """Bereinigt Preis-Strings sicher und vektorisiert."""
+    if pd.isna(price_val): return 0.0
+    res = str(price_val).replace('EUR', '').replace('€', '').strip()
+    res = re.sub(r'[^\d,.]', '', res).replace(',', '.')
+    try:
+        if res.count('.') > 1:
+            parts = res.split('.')
+            res = "".join(parts[:-1]) + "." + parts[-1]
+        return float(res)
+    except: return 0.0
+
+def safe_detect_type(name):
+    """KI-Kategorisierung mit Fehlerabsicherung gegen Nicht-String-Objekte."""
+    n = str(name).lower()
+    if any(x in n for x in ['inverter', 'wechselrichter', 'falownik', 'tripower']): return '🔌 Inverter'
+    if any(x in n for x in ['panel', 'module', 'modul', 'pv', 'shingled']): return '☀️ Modul'
+    if any(x in n for x in ['battery', 'batterie', 'speicher', 'akku', 'storage']): return '🔋 Speicher'
+    if any(x in n for x in ['cable', 'kabel', 'leitung', 'wire']): return '🔗 Kabel'
+    return '📦 Sonstiges'
 
 # --- CACHING DER DATEN ---
-@st.cache_data(show_spinner="Verarbeite Massendaten...")
+@st.cache_data(show_spinner="Analysiere Massendaten (bis zu 1 Mio. Zeilen)...")
 def load_and_combine_data(uploaded_files):
     if not uploaded_files:
         return None
@@ -14,10 +36,10 @@ def load_and_combine_data(uploaded_files):
     all_data = []
     for file in uploaded_files:
         try:
-            # Datei laden
+            # Schnelles Laden
             df_temp = pd.read_csv(file, sep=None, engine='python', on_bad_lines='skip', low_memory=True)
             
-            # Spaltenerkennung
+            # Intelligente Spaltenerkennung
             cols = {
                 'shop': next((c for c in df_temp.columns if any(x in c.lower() for x in ['shop', 'seller', 'anbieter'])), None),
                 'title': next((c for c in df_temp.columns if any(x in c.lower() for x in ['produktname', 'title', 'titel', 'name', 'nazwa'])), df_temp.columns[0]),
@@ -28,35 +50,22 @@ def load_and_combine_data(uploaded_files):
                 'brand': next((c for c in df_temp.columns if any(x in c.lower() for x in ['hersteller', 'brand', 'manufacturer'])), None)
             }
             
+            # Normalisierung & Fehlervermeidung (float-lower fix)
             df_clean = pd.DataFrame()
-            
-            # STABILISIERUNG: Alle Textfelder explizit in String umwandeln (Fix für 'float' error)
-            df_clean['Echter_Name'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
-            df_clean['Shop-Link 🔗'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else None
+            df_clean['Produktname'] = df_temp[cols['title']].fillna("Unbekannt").astype(str)
+            df_clean['Link'] = df_temp[cols['url']].fillna("").astype(str) if cols['url'] else None
             df_clean['Shop'] = df_temp[cols['shop']].fillna(file.name).astype(str) if cols['shop'] else file.name
             df_clean['Hersteller'] = df_temp[cols['brand']].fillna("N/A").astype(str) if cols['brand'] else "N/A"
             
-            # Preis-Reinigung
+            # Preisvektorisierung
             if cols['price']:
-                p_series = df_temp[cols['price']].astype(str).str.replace('EUR', '', case=False).str.replace('€', '')
-                p_series = p_series.str.replace('[^\d,.]', '', regex=True).str.replace(',', '.')
-                df_clean['Preis (€)'] = pd.to_numeric(p_series, errors='coerce').fillna(0.0)
+                df_clean['Preis'] = df_temp[cols['price']].apply(clean_price)
             else:
-                df_clean['Preis (€)'] = 0.0
+                df_clean['Preis'] = 0.0
 
             df_clean['Status'] = df_temp[cols['stock']].fillna("Unbekannt").astype(str) if cols['stock'] else "Unbekannt"
-            
-            # Kategorie-Zuweisung (Fix für 'lower' error durch explizites Casting)
-            def safe_detect(name):
-                n = str(name).lower()
-                if 'tripower' in n or 'inverter' in n or 'wechselrichter' in n: return '🔌 Inverter'
-                if 'panel' in n or 'module' in n or 'modul' in n: return '☀️ Modul'
-                if 'battery' in n or 'batterie' in n or 'speicher' in n: return '🔋 Speicher'
-                if 'cable' in n or 'kabel' in n: return '🔗 Kabel'
-                return '📦 Sonstiges'
-                
-            df_clean['Kategorie'] = df_clean['Echter_Name'].apply(safe_detect)
-            df_clean['Vorschau'] = df_temp[cols['image']].astype(str) if cols['image'] else None
+            df_clean['Kategorie'] = df_clean['Produktname'].apply(safe_detect_type)
+            df_clean['Vorschau'] = df_temp[cols['image']].fillna("").astype(str) if cols['image'] else None
             
             all_data.append(df_clean)
         except Exception as e:
@@ -67,79 +76,84 @@ def load_and_combine_data(uploaded_files):
     return None
 
 # --- UI START ---
-st.title('⚡ Solar Mega-Engine')
-st.markdown("Analysiere bis zu 1 Mio. Zeilen. **Klicke auf den Produktnamen**, um zum Shop zu gelangen.")
+st.title('⚡ Solar Mega-Engine AI')
+st.markdown("Analysiere Preise und Bestände in Echtzeit. **Klicke auf den Link**, um zum Shop zu gelangen.")
 
 with st.sidebar:
     st.header("📥 Massen-Import")
-    files = st.file_uploader("Lieferanten-CSVs hier hochladen", type=['csv'], accept_multiple_files=True)
-    if st.button("Cache leeren / Daten neu laden"):
+    files = st.file_uploader("Alle Lieferanten-Listen (CSV) hochladen", type=['csv'], accept_multiple_files=True)
+    if st.button("🔄 Cache leeren & neu laden"):
         st.cache_data.clear()
         st.rerun()
 
+# Daten laden
 master_df = load_and_combine_data(files)
 
 if master_df is not None:
+    # Such-Index für Autocomplete
     @st.cache_data
     def get_search_index(df):
-        return sorted(df['Echter_Name'].unique().tolist())
+        return sorted(df['Produktname'].unique().tolist())
 
     search_index = get_search_index(master_df)
 
-    st.subheader("🔍 Produktsuche")
+    # --- FILTER BEREICH ---
+    st.subheader("🔍 Sofort-Suche & Autocomplete")
+    
     selected_product = st.selectbox(
-        "Wähle ein Modell aus den Listen:",
+        "Tippe ein Modell oder einen Namen ein:",
         options=[""] + search_index,
-        format_func=lambda x: "🔎 Schnellsuche..." if x == "" else x,
+        format_func=lambda x: "🔎 Schnellsuche starten..." if x == "" else x,
         index=0
     )
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         sel_shops = st.multiselect("Anbieter filtern:", sorted(master_df['Shop'].unique().tolist()))
     with c2:
         sort_order = st.selectbox("Preissortierung:", ["Günstigste zuerst", "Teuerste zuerst"])
+    with c3:
+        st.write(f"📊 **Datenbestand:** {len(master_df):,} Produkte")
 
-    # Filter Logik
+    # --- FILTER LOGIK ---
     filtered_df = master_df
     if selected_product:
-        filtered_df = filtered_df[filtered_df['Echter_Name'] == selected_product]
+        filtered_df = filtered_df[filtered_df['Produktname'] == selected_product]
     if sel_shops:
         filtered_df = filtered_df[filtered_df['Shop'].isin(sel_shops)]
 
     if sort_order == "Günstigste zuerst":
-        filtered_df = filtered_df.sort_values('Preis (€)', ascending=True)
+        filtered_df = filtered_df.sort_values('Preis', ascending=True)
     else:
-        filtered_df = filtered_df.sort_values('Preis (€)', ascending=False)
-
-    st.divider()
-    st.write(f"🔍 **Gefundene Produkte:** {len(filtered_df):,}")
+        filtered_df = filtered_df.sort_values('Preis', ascending=False)
 
     # --- ANZEIGE ---
+    st.divider()
+    
+    # Anzeige-Formatierung
+    # Wir nutzen 'Link' als klickbare Spalte, zeigen aber den 'Produktname' an
     st.dataframe(
         filtered_df.head(1000),
         column_config={
-            "Shop-Link 🔗": st.column_config.LinkColumn(
+            "Link": st.column_config.LinkColumn(
                 "Produktname (Link zum Shop) 🔗", 
-                display_text=r"(.+)" # Verhindert, dass der Linktext den Namen überschreibt
+                display_text=r"(.+)" # Verhindert URL-Anzeige, nutzt Inhalt der Link-Zelle
             ),
-            "Echter_Name": st.column_config.TextColumn("Produktname (Anzeige)"),
-            "Preis (€)": st.column_config.NumberColumn("Preis (€)", format="%.2f €"),
+            "Preis": st.column_config.NumberColumn("Preis", format="%.2f €"),
             "Vorschau": st.column_config.ImageColumn("Bild"),
-            "Shop-Link 🔗": None # Blende die rohe URL-Spalte aus
+            "Produktname": st.column_config.TextColumn("Name für Suche")
         },
         use_container_width=True,
         height=600,
         hide_index=True
     )
     
-    # Da die LinkColumn manchmal Probleme mit dem Namen hat, 
-    # fügen wir hier die klickbare Funktionalität explizit hinzu
     if len(filtered_df) > 1000:
-        st.warning("⚠️ Zeige die ersten 1000 Treffer an.")
+        st.warning("⚠️ Zeige die ersten 1000 Treffer von {len(filtered_df):,} an.")
 
     # Export
     csv_data = filtered_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📊 Auswahl exportieren", csv_data, "solar_export.csv", "text/csv")
+    st.download_button("📊 Auswahl als CSV exportieren", csv_data, "solar_preisvergleich_export.csv", "text/csv")
+
 else:
-    st.info("👋 Bereit. Bitte lade deine CSV-Dateien hoch.")
+    st.info("👋 Willkommen! Bitte laden Sie Ihre CSV-Listen in der Sidebar hoch.")
