@@ -1,0 +1,9 @@
+[server]
+# Standard-Limit von 200 MB anheben, damit auch etwas größere
+# Lieferanten-CSV-Dateien hochgeladen werden können.
+maxUploadSize = 1024
+# Nachrichtengröße passend zum größeren Upload-Limit erhöhen.
+maxMessageSize = 1024
+
+[browser]
+gatherUsageStats = false
