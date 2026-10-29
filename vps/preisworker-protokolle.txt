@@ -1,0 +1,31 @@
+# Preis-Worker: Was tun sie, bevor der Wächter sie neu startet? (Solarics) – ins VPS-Terminal einfügen.
+# NUR LESEN: ändert nichts. Zugangsdaten werden geschwärzt.
+(
+schwaerzen() {
+  sed -E \
+    -e 's/(authorization|x-worker-secret|cookie|set-cookie)[[:space:]]*[:=].*/\1: [GESCHWAERZT]/Ig' \
+    -e 's/bearer[[:space:]]+[^[:space:]"'"'"']+/bearer [GESCHWAERZT]/Ig' \
+    -e 's/(secret|token|password|passwort|apikey|api_key|authorization|bearer|x-worker-secret)([^A-Za-z0-9]{1,4})[^ ,"'"'"'}]+/\1\2[GESCHWAERZT]/Ig' \
+    -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/[GESCHWAERZT-JWT]/g' \
+    -e 's/sb_(secret|publishable)_[A-Za-z0-9_-]+/[GESCHWAERZT-KEY]/g'
+}
+echo "===== W) Aktueller Wächter (/root/preisworker/waechter.sh) ====="
+cat /root/preisworker/waechter.sh 2>/dev/null | schwaerzen
+echo
+echo "===== P) pm2-Startwerte je Worker (Umgebungsnamen, ohne Werte) ====="
+pm2 jlist 2>/dev/null | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  for(const p of JSON.parse(s||"[]")){ if(!/^preisworker/.test(p.name)) continue; const e=p.pm2_env||{};
+    const env=Object.keys(e.env||{}).filter(k=>/^(WORKER|PREIS|MODUS|MODE|ROLLE|ART|QUEUE|SOLARICS|LAGER|NUR)/i.test(k));
+    console.log(p.name.padEnd(15),"args="+JSON.stringify(e.args||[]),"env_namen="+env.join(","));
+  }});'
+echo
+for log in /root/.pm2/logs/preisworker-out.log /root/.pm2/logs/preisworker-[0-9]*-out.log; do
+  [ -f "$log" ] || continue
+  echo "===== $(basename "$log") – letzte 12 Zeilen (Datei zuletzt geschrieben: $(date -u -r "$log" +%H:%M:%SZ)) ====="
+  tail -n 12 "$log" | cut -c1-220 | schwaerzen
+  echo
+done
+echo "===== Z) Jetzt: $(date -u +%H:%M:%SZ) ====="
+echo "===== FERTIG – bitte alles ab „W) Aktueller Wächter“ kopieren und in den Chat einfügen ====="
+)

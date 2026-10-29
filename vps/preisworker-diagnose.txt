@@ -3,6 +3,8 @@
 (
 schwaerzen() {
   sed -E \
+    -e 's/(authorization|x-worker-secret|cookie|set-cookie)[[:space:]]*[:=].*/\1: [GESCHWAERZT]/Ig' \
+    -e 's/bearer[[:space:]]+[^[:space:]"'"'"']+/bearer [GESCHWAERZT]/Ig' \
     -e 's/(secret|token|password|passwort|apikey|api_key|authorization|bearer|x-worker-secret)([^A-Za-z0-9]{1,4})[^ ,"'"'"'}]+/\1\2[GESCHWAERZT]/Ig' \
     -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/[GESCHWAERZT-JWT]/g' \
     -e 's/sb_(secret|publishable)_[A-Za-z0-9_-]+/[GESCHWAERZT-KEY]/g' \
