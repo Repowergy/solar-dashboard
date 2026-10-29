@@ -1,0 +1,43 @@
+# Preis-Worker: Wer startet sie neu? (Solarics) – komplett ins VPS-Terminal einfügen.
+# NUR LESEN: ändert, startet und stoppt nichts.
+(
+echo "===== A) Zeitpläne (crontab) mit pm2 oder Worker ====="
+crontab -l 2>/dev/null | grep -iE "pm2|worker|waechter" || echo "(keine passenden Einträge)"
+ls /etc/cron.d 2>/dev/null | head -20
+grep -rliE "pm2|preisworker" /etc/cron.d /etc/cron.hourly /etc/cron.daily 2>/dev/null || true
+echo
+echo "===== B) Wächter-Protokoll: Anzahl Neustarts und letzte Einträge ====="
+if [ -f /root/preisworker/waechter.log ]; then
+  echo "Einträge gesamt: $(wc -l < /root/preisworker/waechter.log)"
+  echo "davon heute: $(grep -c "$(date -u +%F)" /root/preisworker/waechter.log)"
+  tail -n 8 /root/preisworker/waechter.log
+else
+  echo "(kein /root/preisworker/waechter.log)"
+fi
+for f in /root/preisworker*/waechter*.sh /root/*/waechter*.sh; do [ -f "$f" ] && echo "Wächter-Skript gefunden: $f"; done 2>/dev/null
+echo
+echo "===== C) pm2-Einstellungen je Preis-Worker ====="
+pm2 jlist 2>/dev/null | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  for(const p of JSON.parse(s||"[]")){ if(!/^preisworker/.test(p.name)) continue; const e=p.pm2_env||{};
+    console.log([p.name.padEnd(15),
+      "skript="+(e.pm_exec_path||"-"),
+      "max_speicher_neustart="+(e.max_memory_restart||"aus"),
+      "cron_neustart="+(e.cron_restart||"aus"),
+      "autorestart="+e.autorestart,
+      "kill_timeout="+(e.kill_timeout||"-"),
+      "angelegt="+(e.created_at?new Date(e.created_at).toISOString().slice(0,16):"-"),
+      "neustarts="+e.restart_time].join("  "));
+  }});'
+echo
+echo "===== D) Beendet sich der Worker selbst? (Stellen im Skript) ====="
+for d in /root/preisworker /root/preisworker-*; do
+  [ -d "$d" ] || continue
+  grep -rnE "process\.exit|SIGINT|SIGTERM|process\.kill|max_?laeufe|maxRuns|neustart" "$d" --include=*.js --include=*.mjs --include=*.cjs 2>/dev/null | grep -v node_modules | head -8 | sed "s#^#$d: #"
+done
+echo
+echo "===== E) pm2-Hauptprotokoll: letzte Neustart-Meldungen ====="
+grep -iE "restart|stopping|exited with code|SIGINT" /root/.pm2/pm2.log 2>/dev/null | tail -n 15
+echo
+echo "===== FERTIG – bitte alles ab „A) Zeitpläne“ kopieren und in den Chat einfügen ====="
+)
