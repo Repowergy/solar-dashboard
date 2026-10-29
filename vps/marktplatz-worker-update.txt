@@ -1,0 +1,314 @@
+# Marktplatz-Worker auf Version 29.10.2026 bringen (Solarics). Komplett in das VPS-Terminal einfügen.
+# Ändert nur /root/marktplatz-worker/marktplatz-worker.mjs (mit Sicherungskopie) und startet den Dienst neu.
+# Secret und Einstellungen bleiben, wie sie sind (pm2 restart ohne --update-env).
+(
+set -e
+cd /root/marktplatz-worker
+cp marktplatz-worker.mjs "marktplatz-worker.mjs.vor-2026-10-29.bak"
+echo "OK: Sicherung angelegt (marktplatz-worker.mjs.vor-2026-10-29.bak)"
+cat > marktplatz-worker.neu.mjs <<'SOLARICS_ENDE'
+// Marktplatz-Worker für den VPS (eigener PM2-Dienst: marktplatz-worker).
+// Holt einen Suchauftrag, liest die Seiten mit echtem Browser, meldet zurück.
+// Keine Wiederholung bei Blockade, keine Proxys, keine wechselnden Kennungen.
+import fs from "node:fs";
+import os from "node:os";
+import { chromium } from "playwright";
+
+const BASIS = process.env.SOLARICS_BASIS ?? "https://offer.solarics-angebote.de";
+const SECRET = process.env.WORKER_SHARED_SECRET ?? "";
+const STATE = process.env.MARKTPLATZ_STATE ?? "./marktplatz-state.json";
+const KENNUNG = process.env.WORKER_ID ?? `marktplatz-${os.hostname()}`;
+const KOPF = { "x-worker-secret": SECRET, "x-worker-id": KENNUNG, "Content-Type": "application/json" };
+
+const schlaf = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const BANNER = [
+  "#gdpr-banner-accept",
+  '[data-testid="TopLevel-accept-all"]',
+  "#didomi-notice-agree-button", // leboncoin, subito
+  "#onetrust-accept-btn-handler", // olx.pl
+  'button:has-text("Alle akzeptieren")',
+  'button:has-text("Alle Cookies akzeptieren")',
+  'button:has-text("Zustimmen")',
+  'button:has-text("Accepter")',
+  'button:has-text("Accetta")',
+  'button:has-text("Akceptuję")',
+];
+
+/** Sprache je Anbieter — die Seiten sollen sich wie für einen normalen Besucher verhalten. */
+const LOCALE = { kleinanzeigen: "de-DE", willhaben: "de-AT", leboncoin: "fr-FR", subito: "it-IT", olx_pl: "pl-PL" };
+
+async function zustimmen(seite) {
+  for (const ziel of [seite, ...seite.frames()]) {
+    for (const sel of BANNER) {
+      try {
+        const el = ziel.locator(sel).first();
+        if ((await el.count()) && (await el.isVisible())) {
+          await el.click({ timeout: 4000 });
+          await seite.waitForTimeout(1500);
+          return true;
+        }
+      } catch {
+        /* Banner nicht vorhanden — in Ordnung */
+      }
+    }
+  }
+  return false;
+}
+
+const BLOCKADE =
+  /zugriff verweigert|access denied|captcha|bist du ein mensch|are you a human|verify you are human|429|forbidden|datadome|accès refusé|accesso negato|dostęp zablokowany/i;
+
+function ausNextData(roh, basis) {
+  const treffer = [];
+  const suche = (o) => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) return o.forEach(suche);
+    const id = o.id ?? o.adId;
+    const hatAttr = Array.isArray(o.attributes?.attribute);
+    if (id && (o.description || o.title || hatAttr)) {
+      const attr = {};
+      if (hatAttr) for (const a of o.attributes.attribute) attr[a.name] = (a.values ?? [])[0];
+      const seo = attr.SEO_URL ?? o.seoUrl;
+      treffer.push({
+        anzeigen_id: String(id),
+        titel: o.description ?? o.title ?? attr.HEADING ?? null,
+        preis: attr.PRICE ?? attr.price ?? null,
+        preis_zusatz: attr.PRICE_FOR_DISPLAY ?? null,
+        ort: attr.LOCATION ?? attr.location ?? null,
+        plz: attr.POSTCODE ?? null,
+        datum: attr.PUBLISHED_String ?? attr.PUBLISHED ?? null,
+        link: seo ? new URL(seo, basis).toString() : null,
+        anbietertyp: attr.ISPRIVATE === "1" ? "privat" : attr.ISPRIVATE === "0" ? "gewerblich" : null,
+      });
+      return;
+    }
+    Object.values(o).forEach(suche);
+  };
+  suche(roh);
+  const gesehen = new Set();
+  return treffer.filter((t) => (gesehen.has(t.anzeigen_id) ? false : gesehen.add(t.anzeigen_id)));
+}
+
+/** Erstes Element einer Liste oder der Wert selbst. */
+const erstes = (v) => (Array.isArray(v) ? v[0] : v);
+
+/** leboncoin: __NEXT_DATA__ → Anzeigen mit list_id und subject. */
+function ausLeboncoin(roh, basis) {
+  const treffer = [];
+  const suche = (o) => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) return o.forEach(suche);
+    if (o.list_id && o.subject) {
+      treffer.push({
+        anzeigen_id: String(o.list_id),
+        titel: o.subject ?? null,
+        preis: erstes(o.price) ?? (o.price_cents != null ? o.price_cents / 100 : null),
+        ort: o.location?.city ?? null,
+        plz: o.location?.zipcode ?? null,
+        datum: o.first_publication_date ?? o.index_date ?? null,
+        link: o.url ? new URL(o.url, basis).toString() : null,
+        anbietertyp: o.owner?.type === "pro" ? "gewerblich" : o.owner?.type === "private" ? "privat" : null,
+        kurztext: typeof o.body === "string" ? o.body.slice(0, 200) : null,
+      });
+      return;
+    }
+    Object.values(o).forEach(suche);
+  };
+  suche(roh);
+  return treffer;
+}
+
+/** subito: __NEXT_DATA__ → Anzeigen mit urn und subject. */
+function ausSubito(roh, basis) {
+  const treffer = [];
+  const suche = (o) => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) return o.forEach(suche);
+    if (o.urn && o.subject) {
+      const preisFeld = (o.features ?? []).find?.((f) => f?.uri === "/price");
+      treffer.push({
+        anzeigen_id: String(o.urn),
+        titel: o.subject ?? null,
+        preis: preisFeld?.values?.[0]?.key ?? preisFeld?.values?.[0]?.value ?? null,
+        ort: o.geo?.town?.value ?? o.geo?.city?.value ?? null,
+        datum: o.date ?? null,
+        link: o.urls?.default ? new URL(o.urls.default, basis).toString() : null,
+        anbietertyp: o.advertiser?.company === true ? "gewerblich" : o.advertiser?.company === false ? "privat" : null,
+        kurztext: typeof o.body === "string" ? o.body.slice(0, 200) : null,
+      });
+      return;
+    }
+    Object.values(o).forEach(suche);
+  };
+  suche(roh);
+  return treffer;
+}
+
+function ohneDoppelte(liste) {
+  const gesehen = new Set();
+  return liste.filter((t) => (gesehen.has(t.anzeigen_id) ? false : gesehen.add(t.anzeigen_id)));
+}
+
+/** Hinweistexte der Ergebnisseite, wenn zur Suche nichts inseriert ist. */
+const KEINE_TREFFER = /leider keine ergebnisse|keine ergebnisse gefunden|es wurden keine anzeigen gefunden|keine passenden anzeigen|0 ergebnisse/;
+
+async function leseSeite(seite, adresse, anbieter, wartenMs) {
+  const antwort = await seite.goto(adresse, { waitUntil: "domcontentloaded" });
+  const status = antwort?.status() ?? 0;
+  if (status === 403 || status === 429) throw Object.assign(new Error(`HTTP ${status}`), { blockiert: true });
+  await zustimmen(seite);
+  const rumpf = (await seite.title()) + " " + (await seite.locator("body").innerText().catch(() => ""))
+    .slice(0, 500);
+  if (BLOCKADE.test(rumpf)) throw Object.assign(new Error(rumpf.slice(0, 200)), { blockiert: true });
+
+  if (anbieter === "willhaben" || anbieter === "leboncoin" || anbieter === "subito") {
+    await seite.waitForSelector("script#__NEXT_DATA__", { timeout: wartenMs, state: "attached" });
+    const roh = JSON.parse(await seite.locator("script#__NEXT_DATA__").innerText());
+    if (anbieter === "leboncoin") return ohneDoppelte(ausLeboncoin(roh, adresse));
+    if (anbieter === "subito") return ohneDoppelte(ausSubito(roh, adresse));
+    return ausNextData(roh, adresse);
+  }
+
+  if (anbieter === "olx_pl") {
+    await seite.waitForSelector('[data-cy="l-card"]', { timeout: wartenMs });
+    return seite.$$eval('[data-cy="l-card"]', (karten) =>
+      karten.map((k) => {
+        const t = (sel) => k.querySelector(sel)?.textContent?.trim() ?? null;
+        const a = k.querySelector("a[href]");
+        const ortDatum = t('[data-testid="location-date"]') ?? "";
+        const [ort, datum] = ortDatum.split(" - ");
+        return {
+          anzeigen_id: k.getAttribute("id") ?? a?.getAttribute("href") ?? null,
+          titel: t("h4, h6"),
+          preis: t('[data-testid="ad-price"]'),
+          ort: ort?.trim() || null,
+          datum: datum?.trim() || null,
+          link: a ? new URL(a.getAttribute("href"), location.origin).toString() : null,
+          anbietertyp: null,
+        };
+      }),
+    );
+  }
+
+  // Keine Treffer ist ein gültiges Ergebnis, kein Fehler (29.10.2026: „Solar Fabrik S4-PL-N-425“ lief
+  // 20 s in den Timeout, weil die Seite „keine Ergebnisse“ zeigte und nie ein [data-adid] erschien).
+  const hatAnzeigen = await Promise.race([
+    seite.waitForSelector("[data-adid]", { timeout: wartenMs }).then(() => true),
+    seite
+      .waitForFunction((muster) => new RegExp(muster, "i").test(document.body?.innerText ?? ""), KEINE_TREFFER.source, {
+        timeout: wartenMs,
+      })
+      .then(() => false),
+  ]);
+  if (!hatAnzeigen) return [];
+  return seite.$$eval("[data-adid]", (knoten) =>
+    knoten.map((k) => {
+      const t = (sel) => k.querySelector(sel)?.textContent?.trim() ?? null;
+      const a = k.querySelector("a[href]");
+      return {
+        anzeigen_id: k.getAttribute("data-adid"),
+        titel: t(".text-module-begin, .ellipsis, h2"),
+        preis: t(".aditem-main--middle--price-shipping--price"),
+        preis_zusatz: t(".aditem-main--middle--price-shipping--old-price"),
+        ort: t(".aditem-main--top--left"),
+        datum: t(".aditem-main--top--right"),
+        link: a ? new URL(a.getAttribute("href"), location.origin).toString() : null,
+        anbietertyp: k.querySelector(".badge-hint-pro-small-srp") ? "gewerblich" : "privat",
+        versand_moeglich: /versand möglich/i.test(k.textContent ?? ""),
+      };
+    }),
+  );
+}
+
+/**
+ * Je Runde bis zu AUFTRAEGE_JE_RUNDE Aufträge nacheinander (nie parallel, mit Pause dazwischen) — vorher
+ * genau einer je 30 Minuten, das reichte für die automatischen Modul-Suchen nicht (29.10.2026).
+ */
+const AUFTRAEGE_JE_RUNDE = 4;
+const PAUSE_ZWISCHEN_AUFTRAEGEN_MS = 60_000;
+
+async function runde() {
+  for (let i = 0; i < AUFTRAEGE_JE_RUNDE; i++) {
+    const weiter = await lauf();
+    if (!weiter) return;
+    await schlaf(PAUSE_ZWISCHEN_AUFTRAEGEN_MS);
+  }
+}
+
+/** Ein Auftrag. Rückgabe true, wenn einer bearbeitet wurde (dann darf der nächste folgen). */
+async function lauf() {
+  const r = await fetch(`${BASIS}/api/public/marktplatz/arbeit`, { headers: KOPF });
+  if (!r.ok) {
+    console.error(`Abruf abgelehnt: HTTP ${r.status}${r.status === 401 ? " (Secret passt nicht)" : ""}`);
+    return false;
+  }
+  const arbeit = await r.json();
+  const auftrag = arbeit?.auftrag;
+  if (!auftrag) {
+    console.log("keine fällige Arbeit");
+    return false;
+  }
+
+  const begonnen = Date.now();
+  const regeln = auftrag.regeln ?? {};
+  const wartenMs = regeln.wartenAufErgebnisMs ?? 20000;
+  const browser = await chromium.launch({ headless: true });
+  const kontext = await browser.newContext({
+    locale: LOCALE[auftrag.anbieter] ?? "de-DE",
+    storageState: fs.existsSync(STATE) ? STATE : undefined,
+  });
+  const seite = await kontext.newPage();
+
+  const anzeigen = [];
+  let seitenGelesen = 0;
+  let ergebnis = "ok";
+  let grund = null;
+
+  try {
+    for (const adresse of (auftrag.adressen ?? []).slice(0, regeln.maxSeiten ?? 3)) {
+      const teil = await leseSeite(seite, adresse, auftrag.anbieter, wartenMs);
+      anzeigen.push(...teil);
+      seitenGelesen += 1;
+      await schlaf(regeln.pauseMs ?? 3000); // nie parallel, nie schneller
+    }
+    await kontext.storageState({ path: STATE }); // Zustimmung behalten
+  } catch (e) {
+    ergebnis = e?.blockiert ? "blockiert" : "fehler";
+    grund = String(e?.message ?? e).slice(0, 400);
+  } finally {
+    await browser.close();
+  }
+
+  const antwort = await fetch(`${BASIS}/api/public/marktplatz/ergebnis`, {
+    method: "POST",
+    headers: KOPF,
+    body: JSON.stringify({
+      suche_id: auftrag.suche_id,
+      anbieter: auftrag.anbieter,
+      seiten_gelesen: seitenGelesen,
+      dauer_ms: Date.now() - begonnen,
+      ergebnis,
+      grund,
+      anzeigen: ergebnis === "ok" ? anzeigen : [],
+    }),
+  }).then((r) => r.json());
+  console.log(auftrag.anbieter, ergebnis, JSON.stringify(antwort));
+  // Nach einer Blockade in dieser Runde nichts weiter abrufen.
+  return ergebnis !== "blockiert";
+}
+
+// Alle 30 Minuten nachsehen; die Fälligkeit entscheidet der Server.
+console.log(`Marktplatz-Worker gestartet (${KENNUNG}) → ${BASIS}`);
+await runde().catch((e) => console.error("Runde gescheitert:", e));
+setInterval(() => runde().catch((e) => console.error("Runde gescheitert:", e)), 30 * 60 * 1000);
+SOLARICS_ENDE
+node --check marktplatz-worker.neu.mjs || { echo "FEHLER: neue Datei fehlerhaft - nichts geändert, Worker läuft mit alter Version weiter"; exit 1; }
+echo "OK: neue Datei ist in Ordnung"
+mv marktplatz-worker.neu.mjs marktplatz-worker.mjs
+pm2 restart marktplatz-worker
+pm2 save
+echo "Warte 90 Sekunden auf den ersten Lauf ..."
+sleep 90
+pm2 logs marktplatz-worker --lines 30 --nostream
+)
