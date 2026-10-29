@@ -1,11 +1,11 @@
-# Marktplatz-Worker auf Version 29.10.2026 bringen (Solarics). Komplett in das VPS-Terminal einfügen.
+# Marktplatz-Worker auf Version 29.10.2026 (2) bringen — willhaben liest wieder echte Anzeigen (Solarics). Komplett in das VPS-Terminal einfügen.
 # Ändert nur /root/marktplatz-worker/marktplatz-worker.mjs (mit Sicherungskopie) und startet den Dienst neu.
 # Secret und Einstellungen bleiben, wie sie sind (pm2 restart ohne --update-env).
 (
 set -e
 cd /root/marktplatz-worker
-cp marktplatz-worker.mjs "marktplatz-worker.mjs.vor-2026-10-29.bak"
-echo "OK: Sicherung angelegt (marktplatz-worker.mjs.vor-2026-10-29.bak)"
+cp marktplatz-worker.mjs "marktplatz-worker.mjs.vor-2026-10-29b.bak"
+echo "OK: Sicherung angelegt (marktplatz-worker.mjs.vor-2026-10-29b.bak)"
 cat > marktplatz-worker.neu.mjs <<'SOLARICS_ENDE'
 // Marktplatz-Worker für den VPS (eigener PM2-Dienst: marktplatz-worker).
 // Holt einen Suchauftrag, liest die Seiten mit echtem Browser, meldet zurück.
@@ -66,7 +66,10 @@ function ausNextData(roh, basis) {
     if (Array.isArray(o)) return o.forEach(suche);
     const id = o.id ?? o.adId;
     const hatAttr = Array.isArray(o.attributes?.attribute);
-    if (id && (o.description || o.title || hatAttr)) {
+    // Nur echte Anzeigen haben attributes.attribute. Objekte mit bloßer id + title sind Menüpunkte oder der
+    // Rahmen „Alle Anzeigen“ (searchResult, id 301) — dort weitersuchen statt abbrechen (29.10.2026: seit 26.10.
+    // kamen nur „Immobilien“, „Jobs“, „Marktplatz“, „Alle Anzeigen“, „Auto & Motor“ zurück).
+    if (id && hatAttr) {
       const attr = {};
       if (hatAttr) for (const a of o.attributes.attribute) attr[a.name] = (a.values ?? [])[0];
       const seo = attr.SEO_URL ?? o.seoUrl;
@@ -151,7 +154,7 @@ function ohneDoppelte(liste) {
 }
 
 /** Hinweistexte der Ergebnisseite, wenn zur Suche nichts inseriert ist. */
-const KEINE_TREFFER = /leider keine ergebnisse|keine ergebnisse gefunden|es wurden keine anzeigen gefunden|keine passenden anzeigen|0 ergebnisse/;
+const KEINE_TREFFER = /leider keine ergebnisse|keine ergebnisse für|keine ergebnisse gefunden|es wurden keine anzeigen gefunden|keine passenden anzeigen|0 ergebnisse/;
 
 async function leseSeite(seite, adresse, anbieter, wartenMs) {
   const antwort = await seite.goto(adresse, { waitUntil: "domcontentloaded" });
