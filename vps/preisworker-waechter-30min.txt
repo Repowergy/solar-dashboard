@@ -1,0 +1,19 @@
+# Preis-Worker-Wächter: erst nach 30 statt 10 Minuten Stille neu starten (Solarics, 29.10.2026).
+# Ändert NUR die Schwelle 600 -> 1800 Sekunden in /root/preisworker/waechter.sh (mit Sicherungskopie).
+# Grund: die Worker sind meist ohne Arbeit und schreiben dann >10 Minuten nichts -> 108 Fehlalarm-Neustarts heute.
+# Rückgängig: cp /root/preisworker/waechter.sh.vor-2026-10-29.bak /root/preisworker/waechter.sh
+(
+f=/root/preisworker/waechter.sh
+[ -f "$f" ] || { echo "FEHLT: $f – nichts geändert"; exit 0; }
+if grep -qE -- '-gt 1800([^0-9]|$)' "$f" && ! grep -qE -- '-gt 600([^0-9]|$)' "$f"; then echo "Bereits umgestellt (30 Minuten) – nichts zu tun."; exit 0; fi
+if ! grep -qE -- '-gt 600([^0-9]|$)' "$f"; then
+  echo "Schwelle 600 nicht gefunden – NICHTS geändert. Bitte diese Ausgabe in den Chat kopieren:"
+  grep -nE -- '-gt [0-9]+' "$f" || cat "$f"
+  exit 0
+fi
+cp "$f" "$f.vor-2026-10-29.bak" && echo "OK: Sicherung $f.vor-2026-10-29.bak"
+sed -i -E 's/-gt 600([^0-9]|$)/-gt 1800\1/g' "$f"
+bash -n "$f" && echo "OK: Wächter-Skript gültig" || { cp "$f.vor-2026-10-29.bak" "$f"; echo "FEHLER – alte Version wiederhergestellt"; exit 0; }
+echo "Neue Schwelle:"; grep -nE -- '-gt [0-9]+' "$f"
+echo "Wirkt ab dem nächsten 5-Minuten-Lauf, kein Neustart nötig."
+)
