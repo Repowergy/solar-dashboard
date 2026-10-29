@@ -1,0 +1,41 @@
+# Preis-Worker prüfen (Solarics) – komplett ins VPS-Terminal einfügen.
+# NUR LESEN: ändert, startet und stoppt nichts. Zugangsdaten werden in der Ausgabe geschwärzt.
+(
+schwaerzen() {
+  sed -E \
+    -e 's/(secret|token|password|passwort|apikey|api_key|authorization|bearer|x-worker-secret)([^A-Za-z0-9]{1,4})[^ ,"'"'"'}]+/\1\2[GESCHWAERZT]/Ig' \
+    -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/[GESCHWAERZT-JWT]/g' \
+    -e 's/sb_(secret|publishable)_[A-Za-z0-9_-]+/[GESCHWAERZT-KEY]/g' \
+    -e 's/sk-[A-Za-z0-9_-]{16,}/[GESCHWAERZT-KEY]/g'
+}
+echo "===== 1) Übersicht pm2 (Neustarts, Laufzeit, Speicher) ====="
+pm2 jlist 2>/dev/null | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const l=JSON.parse(s||"[]");
+  for(const p of l){const e=p.pm2_env||{};
+    const lauf=e.pm_uptime?Math.round((Date.now()-e.pm_uptime)/60000)+" min":"-";
+    console.log([p.name.padEnd(18),"status="+e.status,"neustarts="+e.restart_time,"instabil="+e.unstable_restarts,"laeuft_seit="+lauf,"speicher="+Math.round((p.monit?.memory||0)/1048576)+"MB","exit="+(e.exit_code??"-")].join("  "));
+  }});'
+echo
+echo "===== 2) Server: Arbeitsspeicher, Platte, Speicherkiller ====="
+free -m
+df -h / | tail -1
+dmesg -T 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -5 || echo "(dmesg nicht lesbar)"
+echo
+for name in preisworker preisworker-2 preisworker-5; do
+  echo "===== 3) Fehlerprotokoll $name – häufigste Fehlerzeilen ====="
+  datei="/root/.pm2/logs/${name}-error.log"
+  if [ -f "$datei" ]; then
+    tail -n 2000 "$datei" | grep -vE "^\s*at |^\s*$|^\s*[{}]\s*$" | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z?//g' | sort | uniq -c | sort -rn | head -8 | schwaerzen
+    echo "--- letzte 25 Zeilen:"
+    tail -n 25 "$datei" | schwaerzen
+  else
+    echo "(keine Datei $datei)"
+  fi
+  echo
+done
+echo "===== 4) Letzte Zeilen Ausgabeprotokoll preisworker ====="
+tail -n 15 /root/.pm2/logs/preisworker-out.log 2>/dev/null | schwaerzen
+echo
+echo "===== FERTIG – bitte alles ab „1) Übersicht“ kopieren und in den Chat einfügen ====="
+)
